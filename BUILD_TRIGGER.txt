@@ -1,1 +1,2 @@
 Trigger HikVisionTV APK verification build.
+Synchronize workflow execution.

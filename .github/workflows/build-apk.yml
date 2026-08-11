@@ -25,17 +25,13 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Extract source
-        run: unzip -o HikVisionTV_Source_v1.0.zip
-
       - name: Build debug APK
-        working-directory: HikVisionTV
         run: gradle assembleDebug --stacktrace
 
       - name: Prepare APK
         run: |
           mkdir -p artifact
-          cp HikVisionTV/app/build/outputs/apk/debug/app-debug.apk artifact/HikVisionTV_v1.0_debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk artifact/HikVisionTV_v1.0_debug.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4

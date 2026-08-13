@@ -5,6 +5,8 @@ import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.InputType;
 import android.view.Gravity;
 import android.widget.Button;
@@ -25,13 +27,29 @@ import androidx.media3.ui.PlayerView;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 public class MainActivity extends Activity {
     private final List<ExoPlayer> players = new ArrayList<>();
+    private final Handler handler = new Handler(Looper.getMainLooper());
     private SharedPreferences prefs;
     private LinearLayout root;
     private boolean inSettings = false;
+    private ExoPlayer probePlayer;
+    private int probeGeneration = 0;
+
+    private static class Candidate {
+        final int port;
+        final String style;
+        final boolean main;
+        Candidate(int port, String style, boolean main) {
+            this.port = port;
+            this.style = style;
+            this.main = main;
+        }
+    }
 
     @Override
     public void onCreate(Bundle b) {
@@ -122,14 +140,14 @@ public class MainActivity extends Activity {
         scroll.addView(body);
         setContentView(scroll);
 
-        body.addView(text("HikVision TV v1.1 - Connection Settings", 28));
-        TextView help = text("Enter the LOCAL IP of the DVR/NVR. RTSP port is normally 554; some Hikvision setups use 10554. Do NOT use Server Port 8000 here.", 15);
+        body.addView(text("HikVision TV v1.2 - Connection Settings", 28));
+        TextView help = text("Use the LOCAL IP of the DVR/NVR. RTSP is commonly 554 or 10554. Server Port 8000 is not RTSP.", 15);
         help.setTextColor(Color.LTGRAY);
         body.addView(help);
 
         EditText host = field("DVR / NVR IP (example: 192.168.1.64)", prefs.getString("host", ""));
         body.addView(host, new LinearLayout.LayoutParams(-1, 62));
-        EditText port = field("RTSP Port: try 554, then 10554", String.valueOf(prefs.getInt("port", 554)));
+        EditText port = field("RTSP Port", String.valueOf(prefs.getInt("port", 554)));
         port.setInputType(InputType.TYPE_CLASS_NUMBER);
         body.addView(port, new LinearLayout.LayoutParams(-1, 62));
         EditText user = field("Username", prefs.getString("user", "admin"));
@@ -142,20 +160,23 @@ public class MainActivity extends Activity {
         body.addView(channels, new LinearLayout.LayoutParams(-1, 62));
 
         CheckBox mainGrid = new CheckBox(this);
-        mainGrid.setText("Use MAIN stream in grid (Sub stream is recommended for multi-view)");
+        mainGrid.setText("Use MAIN stream in grid (Sub is recommended)");
         mainGrid.setTextColor(Color.WHITE);
         mainGrid.setChecked(prefs.getBoolean("gridMain", false));
         mainGrid.setFocusable(true);
         body.addView(mainGrid, new LinearLayout.LayoutParams(-1, 58));
 
-        TextView testStatus = text("Connection test status will appear here.", 15);
+        TextView testStatus = text("Tip: use Auto Detect CH1 first.", 15);
         testStatus.setTextColor(Color.rgb(120, 190, 255));
         body.addView(testStatus);
 
+        Button auto = button("AUTO DETECT CH1");
+        body.addView(auto, new LinearLayout.LayoutParams(-1, 72));
+
         LinearLayout row = new LinearLayout(this);
-        Button testPort = button("Test RTSP Port");
-        Button testMain = button("Test CH1 Main");
-        Button testSub = button("Test CH1 Sub");
+        Button testPort = button("Test Port");
+        Button testMain = button("Test Main");
+        Button testSub = button("Test Sub");
         row.addView(testPort, new LinearLayout.LayoutParams(0, 64, 1));
         row.addView(testMain, new LinearLayout.LayoutParams(0, 64, 1));
         row.addView(testSub, new LinearLayout.LayoutParams(0, 64, 1));
@@ -164,6 +185,10 @@ public class MainActivity extends Activity {
         Button save = button("Save & Open Live View");
         body.addView(save, new LinearLayout.LayoutParams(-1, 68));
 
+        auto.setOnClickListener(v -> {
+            saveSettings(host, port, user, pass, channels, mainGrid);
+            showAutoDetect();
+        });
         testPort.setOnClickListener(v -> {
             saveSettings(host, port, user, pass, channels, mainGrid);
             testTcpPort(testStatus);
@@ -180,7 +205,7 @@ public class MainActivity extends Activity {
             saveSettings(host, port, user, pass, channels, mainGrid);
             showLive();
         });
-        host.requestFocus();
+        auto.requestFocus();
     }
 
     private void testTcpPort(TextView status) {
@@ -191,53 +216,63 @@ public class MainActivity extends Activity {
             String result;
             try (Socket s = new Socket()) {
                 s.connect(new InetSocketAddress(host, port), 4000);
-                result = "RTSP PORT OPEN: " + host + ":" + port + "  ✓";
+                result = "RTSP PORT OPEN: " + host + ":" + port + " ✓";
             } catch (Exception e) {
-                result = "RTSP PORT FAILED: " + host + ":" + port + "  — " + safeMessage(e) + "\nTry port 554 or 10554 and confirm TV is on the same network.";
+                result = "PORT FAILED: " + host + ":" + port + " — " + safeMessage(e);
             }
             String finalResult = result;
             runOnUiThread(() -> status.setText(finalResult));
         }).start();
     }
 
-    private String rtsp(int ch, boolean main) {
+    private String pathFor(String style, int id) {
+        if ("upper".equals(style)) return "/Streaming/Channels/" + id;
+        if ("isapi".equals(style)) return "/ISAPI/Streaming/channels/" + id;
+        return "/Streaming/channels/" + id;
+    }
+
+    private String rtspFor(int ch, boolean main, int port, String style) {
         String host = prefs.getString("host", "");
-        int port = prefs.getInt("port", 554);
         String user = prefs.getString("user", "admin");
         String pass = prefs.getString("pass", "");
         int id = ch * 100 + (main ? 1 : 2);
         String auth = "";
         if (!user.isEmpty()) auth = Uri.encode(user) + ":" + Uri.encode(pass) + "@";
-        return "rtsp://" + auth + host + ":" + port + "/Streaming/Channels/" + id;
+        return "rtsp://" + auth + host + ":" + port + pathFor(style, id);
+    }
+
+    private String rtsp(int ch, boolean main) {
+        return rtspFor(ch, main, prefs.getInt("port", 554), prefs.getString("pathStyle", "lower"));
+    }
+
+    private String displayRtspFor(int ch, boolean main, int port, String style) {
+        String host = prefs.getString("host", "");
+        String user = prefs.getString("user", "admin");
+        int id = ch * 100 + (main ? 1 : 2);
+        return "rtsp://" + (user.isEmpty() ? "" : user + ":***@") + host + ":" + port + pathFor(style, id);
     }
 
     private String displayRtsp(int ch, boolean main) {
-        String host = prefs.getString("host", "");
-        int port = prefs.getInt("port", 554);
-        String user = prefs.getString("user", "admin");
-        int id = ch * 100 + (main ? 1 : 2);
-        return "rtsp://" + (user.isEmpty() ? "" : user + ":***@") + host + ":" + port + "/Streaming/Channels/" + id;
+        return displayRtspFor(ch, main, prefs.getInt("port", 554), prefs.getString("pathStyle", "lower"));
     }
 
     private ExoPlayer makePlayer(PlayerView view, int ch, boolean main, TextView status) {
         ExoPlayer p = new ExoPlayer.Builder(this).build();
         RtspMediaSource src = new RtspMediaSource.Factory()
                 .setForceUseRtpTcp(true)
+                .setTimeoutMs(8000)
                 .createMediaSource(MediaItem.fromUri(Uri.parse(rtsp(ch, main))));
         view.setPlayer(p);
         view.setUseController(false);
         p.addListener(new Player.Listener() {
-            @Override
-            public void onPlaybackStateChanged(int state) {
+            @Override public void onPlaybackStateChanged(int state) {
                 if (state == Player.STATE_BUFFERING && status != null) status.setText("Connecting " + (main ? "MAIN" : "SUB") + " ...");
                 if (state == Player.STATE_READY && status != null) {
-                    status.setText("CONNECTED ✓  " + (main ? "MAIN" : "SUB") + "  |  " + displayRtsp(ch, main));
+                    status.setText("CONNECTED ✓  " + displayRtsp(ch, main));
                     status.setTextColor(Color.rgb(110, 230, 140));
                 }
             }
-
-            @Override
-            public void onPlayerError(PlaybackException error) {
+            @Override public void onPlayerError(PlaybackException error) {
                 if (status != null) {
                     status.setText(buildFriendlyError(error, ch, main));
                     status.setTextColor(Color.rgb(255, 120, 120));
@@ -252,22 +287,123 @@ public class MainActivity extends Activity {
         return p;
     }
 
+    private List<Candidate> buildCandidates() {
+        List<Candidate> out = new ArrayList<>();
+        Set<Integer> ports = new LinkedHashSet<>();
+        ports.add(prefs.getInt("port", 554));
+        ports.add(554);
+        ports.add(10554);
+        String[] styles = new String[]{"lower", "upper", "isapi"};
+        for (int p : ports) {
+            for (String style : styles) {
+                out.add(new Candidate(p, style, true));
+                out.add(new Candidate(p, style, false));
+            }
+        }
+        return out;
+    }
+
+    private void showAutoDetect() {
+        base();
+        int generation = ++probeGeneration;
+        LinearLayout bar = new LinearLayout(this);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        TextView title = text("Auto Detect Hikvision CH1", 22);
+        Button back = button("Back");
+        bar.addView(title, new LinearLayout.LayoutParams(0, 58, 1));
+        bar.addView(back, new LinearLayout.LayoutParams(160, 58));
+        root.addView(bar);
+
+        TextView status = text("Starting automatic stream detection...", 16);
+        status.setTextColor(Color.rgb(120, 190, 255));
+        root.addView(status, new LinearLayout.LayoutParams(-1, 120));
+        PlayerView pv = new PlayerView(this);
+        root.addView(pv, new LinearLayout.LayoutParams(-1, 0, 1));
+        Button open = button("Open Live View");
+        open.setEnabled(false);
+        root.addView(open, new LinearLayout.LayoutParams(-1, 64));
+
+        back.setOnClickListener(v -> { ++probeGeneration; showSettings(); });
+        open.setOnClickListener(v -> showLive());
+        List<Candidate> candidates = buildCandidates();
+        tryCandidate(generation, 0, candidates, pv, status, open);
+        back.requestFocus();
+    }
+
+    private void tryCandidate(int generation, int index, List<Candidate> candidates, PlayerView pv, TextView status, Button open) {
+        if (generation != probeGeneration) return;
+        if (probePlayer != null) {
+            try { probePlayer.release(); } catch (Exception ignored) {}
+            probePlayer = null;
+        }
+        if (index >= candidates.size()) {
+            status.setTextColor(Color.rgb(255, 120, 120));
+            status.setText("NO H.264 STREAM FOUND. RTSP port may be open, but none of the standard Hikvision streams could be played.\n\nMost likely causes: 1) stream codec is H.265/H.265+, 2) username/password is rejected, 3) device uses a custom RTSP port/path.\n\nSet CH1 Main and Sub video encoding to H.264 in the Hikvision recorder/camera and run Auto Detect again.");
+            return;
+        }
+
+        Candidate c = candidates.get(index);
+        String shown = displayRtspFor(1, c.main, c.port, c.style);
+        status.setTextColor(Color.rgb(120, 190, 255));
+        status.setText("Trying " + (index + 1) + "/" + candidates.size() + "\n" + shown);
+
+        ExoPlayer p = new ExoPlayer.Builder(this).build();
+        probePlayer = p;
+        pv.setPlayer(p);
+        pv.setUseController(false);
+        boolean[] finished = new boolean[]{false};
+
+        Runnable next = () -> {
+            if (generation != probeGeneration || finished[0]) return;
+            finished[0] = true;
+            try { p.release(); } catch (Exception ignored) {}
+            if (probePlayer == p) probePlayer = null;
+            handler.postDelayed(() -> tryCandidate(generation, index + 1, candidates, pv, status, open), 250);
+        };
+
+        p.addListener(new Player.Listener() {
+            @Override public void onPlaybackStateChanged(int state) {
+                if (generation != probeGeneration || finished[0]) return;
+                if (state == Player.STATE_READY) {
+                    finished[0] = true;
+                    prefs.edit().putInt("port", c.port).putString("pathStyle", c.style).apply();
+                    status.setTextColor(Color.rgb(110, 230, 140));
+                    status.setText("FOUND ✓\n" + shown + "\n\nThis RTSP stream is playable. Settings were saved automatically.");
+                    open.setEnabled(true);
+                    open.requestFocus();
+                }
+            }
+            @Override public void onPlayerError(PlaybackException error) {
+                next.run();
+            }
+        });
+
+        RtspMediaSource src = new RtspMediaSource.Factory()
+                .setForceUseRtpTcp(true)
+                .setTimeoutMs(5000)
+                .createMediaSource(MediaItem.fromUri(Uri.parse(rtspFor(1, c.main, c.port, c.style))));
+        p.setMediaSource(src);
+        p.prepare();
+        p.play();
+        handler.postDelayed(next, 6500);
+    }
+
     private String buildFriendlyError(Throwable error, int ch, boolean main) {
         String details = fullError(error);
         String low = details.toLowerCase();
         String hint;
         if (low.contains("401") || low.contains("unauthorized") || low.contains("authentication")) {
-            hint = "Username/password rejected. Check Hikvision credentials.";
+            hint = "Username/password rejected.";
         } else if (low.contains("404") || low.contains("not found")) {
-            hint = "Stream path/channel not found. Check channel number.";
+            hint = "Stream path/channel not found.";
         } else if (low.contains("connect") || low.contains("timeout") || low.contains("refused") || low.contains("unreachable")) {
-            hint = "Cannot reach RTSP service. Check IP and try RTSP port 554 or 10554.";
-        } else if (low.contains("decoder") || low.contains("format") || low.contains("unsupported") || low.contains("codec")) {
-            hint = "Codec may be unsupported. Set this Hikvision stream to H.264 (not H.265/H.265+).";
+            hint = "Cannot reach RTSP stream. Try 554 or 10554.";
+        } else if (low.contains("decoder") || low.contains("format") || low.contains("unsupported") || low.contains("codec") || low.contains("h265") || low.contains("hevc")) {
+            hint = "Set Hikvision stream codec to H.264 (not H.265/H.265+).";
         } else {
-            hint = "Check IP/RTSP port/login, then set the Hikvision stream codec to H.264.";
+            hint = "Check login/path and set stream codec to H.264.";
         }
-        return "CH " + ch + " " + (main ? "MAIN" : "SUB") + " ERROR\n" + hint + "\n" + shortText(details, 180);
+        return "CH " + ch + " " + (main ? "MAIN" : "SUB") + " ERROR\n" + hint + "\n" + shortText(details, 220);
     }
 
     private String fullError(Throwable e) {
@@ -298,12 +434,12 @@ public class MainActivity extends Activity {
         LinearLayout bar = new LinearLayout(this);
         bar.setGravity(Gravity.CENTER_VERTICAL);
         Button back = button("Back to Settings");
-        bar.addView(text("CH1 " + (main ? "MAIN" : "SUB") + " stream test", 22), new LinearLayout.LayoutParams(0, 58, 1));
+        bar.addView(text("CH1 " + (main ? "MAIN" : "SUB") + " test", 22), new LinearLayout.LayoutParams(0, 58, 1));
         bar.addView(back, new LinearLayout.LayoutParams(220, 58));
         root.addView(bar);
         TextView status = text("Testing: " + displayRtsp(1, main), 16);
         status.setTextColor(Color.rgb(120, 190, 255));
-        root.addView(status, new LinearLayout.LayoutParams(-1, 88));
+        root.addView(status, new LinearLayout.LayoutParams(-1, 110));
         PlayerView pv = new PlayerView(this);
         root.addView(pv, new LinearLayout.LayoutParams(-1, 0, 1));
         makePlayer(pv, 1, main, status);
@@ -315,7 +451,7 @@ public class MainActivity extends Activity {
         base();
         LinearLayout bar = new LinearLayout(this);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.addView(text("HikVision TV v1.1", 24), new LinearLayout.LayoutParams(0, 56, 1));
+        bar.addView(text("HikVision TV v1.2", 24), new LinearLayout.LayoutParams(0, 56, 1));
         Button settings = button("Settings");
         bar.addView(settings, new LinearLayout.LayoutParams(160, 56));
         settings.setOnClickListener(v -> showSettings());
@@ -340,7 +476,7 @@ public class MainActivity extends Activity {
             tile.addView(pv, new LinearLayout.LayoutParams(-1, 0, 1));
             TextView lab = text("CH " + i + " - connecting...", 12);
             lab.setBackgroundColor(Color.rgb(25, 25, 25));
-            tile.addView(lab, new LinearLayout.LayoutParams(-1, 54));
+            tile.addView(lab, new LinearLayout.LayoutParams(-1, 62));
             GridLayout.LayoutParams lp = new GridLayout.LayoutParams();
             lp.width = 0;
             lp.height = 0;
@@ -367,7 +503,7 @@ public class MainActivity extends Activity {
         f.setBackgroundColor(Color.BLACK);
         setContentView(f);
         TextView label = text("CH " + ch + " MAIN - connecting...   (BACK to grid)", 15);
-        f.addView(label, new LinearLayout.LayoutParams(-1, 72));
+        f.addView(label, new LinearLayout.LayoutParams(-1, 80));
         PlayerView pv = new PlayerView(this);
         pv.setFocusable(true);
         f.addView(pv, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -377,11 +513,17 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        ++probeGeneration;
         if (inSettings || prefs.getString("host", "").isEmpty()) super.onBackPressed();
         else showLive();
     }
 
     private void releasePlayers() {
+        ++probeGeneration;
+        if (probePlayer != null) {
+            try { probePlayer.release(); } catch (Exception ignored) {}
+            probePlayer = null;
+        }
         for (ExoPlayer p : players) {
             try { p.release(); } catch (Exception ignored) {}
         }

@@ -1,0 +1,4 @@
+Trigger HikVisionTV APK verification build.
+Synchronize workflow execution.
+Run decoded-source build.
+Run direct-source build.
